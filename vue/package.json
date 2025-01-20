@@ -1,0 +1,33 @@
+{
+  "name": "minimalvue3",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "serve": "vue-cli-service serve",
+    "build": "vue-cli-service build",
+    "deploy": "npm run build && npm run deploy:clean && npm run deploy:move && npm run deploy:gzip",
+    "deploy:clean": "rm -f ../data/app.js* ../data/app.css* ../data/index.html*",
+    "deploy:move": "cp dist/* ../data/",
+    "deploy:gzip": "gzip ../data/index.html && gzip ../data/app.js && gzip ../data/app.css"
+},
+  "dependencies": {
+    "@mdi/font": "5.9.55",
+    "@mdi/js": "^7.4.47",
+    "roboto-fontface": "*",
+    "vue": "^3.2.13",
+    "vue-router": "^4.0.3",
+    "vuetify": "^3.0.0-beta.0",
+    "webfontloader": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/webfontloader": "^1.0.0",
+    "@vue/cli-plugin-router": "~5.0.0",
+    "@vue/cli-plugin-typescript": "~5.0.0",
+    "@vue/cli-service": "~5.0.0",
+    "sass": "^1.32.7",
+    "sass-loader": "^12.0.0",
+    "typescript": "^5.4.5",
+    "vue-cli-plugin-vuetify": "^2.5.8",
+    "webpack-plugin-vuetify": "^2.0.0-alpha.0"
+  }
+}

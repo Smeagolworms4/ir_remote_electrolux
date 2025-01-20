@@ -1,0 +1,522 @@
+#include <Arduino.h>
+#include <helper.h>
+#include <Arduino.h>
+#include <helper.h>
+#include <FileFS.h>
+#include <WebServer.h>
+#include <WifiService.h>
+#include <MqttService.h>
+
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+
+#define PROJECT_NAME "REMOTE_HOTTE"
+
+#define PIN_LED_WIFI PIN_D4
+#define SEND_PIN PIN_D8
+#define LONG_RESET_TIME 10000 
+
+
+// based on https://pastebin.com/N6kG7Wu5
+#define HOB_TO_HOOD_UNIT_MICROS     725
+#define H2H_1   HOB_TO_HOOD_UNIT_MICROS
+#define H2H_2   (HOB_TO_HOOD_UNIT_MICROS*2) // 1450
+#define H2H_3   (HOB_TO_HOOD_UNIT_MICROS*3) // 2175
+#define H2H_4   (HOB_TO_HOOD_UNIT_MICROS*4) // 2900
+#define H2H_5   (HOB_TO_HOOD_UNIT_MICROS*5) // 3625
+
+// First entry is the length of the raw command
+const uint16_t Fan1[] { H2H_2, H2H_2, H2H_1, H2H_2, H2H_3, H2H_2, H2H_1, H2H_2, H2H_1, H2H_1, H2H_1, H2H_2, H2H_1, H2H_3, H2H_1 };
+const uint16_t Fan2[] { H2H_2, H2H_2, H2H_1, H2H_4, H2H_1, H2H_3, H2H_5, H2H_3, H2H_3 };
+const uint16_t Fan3[] { H2H_1, H2H_3, H2H_4, H2H_4, H2H_3, H2H_1, H2H_1, H2H_3, H2H_3 };
+const uint16_t Fan4[] { H2H_2, H2H_3, H2H_2, H2H_1, H2H_2, H2H_3, H2H_2, H2H_2, H2H_1, H2H_3, H2H_1, H2H_1, H2H_2 };
+const uint16_t FanOff[] { H2H_1, H2H_2, H2H_1, H2H_2, H2H_3, H2H_2, H2H_1, H2H_2, H2H_2, H2H_3, H2H_1, H2H_2, H2H_1, H2H_1, H2H_1 };
+const uint16_t LightOn[] { H2H_1, H2H_2, H2H_1, H2H_1, H2H_2, H2H_1, H2H_1, H2H_2, H2H_1, H2H_1, H2H_2, H2H_4, H2H_1, H2H_1, H2H_1, H2H_1, H2H_2 };
+const uint16_t LightOff[] { H2H_1, H2H_2, H2H_1, H2H_1, H2H_1, H2H_1, H2H_1, H2H_3, H2H_1, H2H_1, H2H_1, H2H_2, H2H_1, H2H_2, H2H_1, H2H_1, H2H_1 };
+
+
+int lengthFan1     = sizeof(Fan1    ) / sizeof(Fan1[0]);
+int lengthFan2     = sizeof(Fan2    ) / sizeof(Fan2[0]);
+int lengthFan3     = sizeof(Fan3    ) / sizeof(Fan3[0]);
+int lengthFan4     = sizeof(Fan4    ) / sizeof(Fan4[0]);
+int lengthFanOff   = sizeof(FanOff  ) / sizeof(FanOff[0]);
+int lengthLightOn  = sizeof(LightOn ) / sizeof(LightOn [0]);
+int lengthLightOff = sizeof(LightOff) / sizeof(LightOff[0]);
+
+FileFS fileFS;
+WebServer webServer;
+WifiService wifiService(PROJECT_NAME);
+MqttService mqttService;
+IRsend irsend(SEND_PIN);
+
+struct {
+    unsigned long duration;
+    int resetCount;
+} rtcMem;
+
+unsigned long currentTime;
+String lastSignal = "";
+String mqttPreset = "low";
+uint8_t signal = 0;
+uint previous = 0;
+uint sendConfig = 0;
+
+String deviceId() {
+    return String(ESP.getChipId(), HEX);
+}
+
+String nameDeviceId() {
+    return String(PROJECT_NAME) + F("_") + deviceId();
+}
+
+String devicePath() {
+    String path = F("diy/") + nameDeviceId() + F("/");
+    path.toLowerCase();
+    return path;
+}
+
+String sendPath() {
+    return devicePath() + F("send");   
+}
+
+String speedPath() {
+    return devicePath() + F("speed");   
+}
+
+String statePath() {
+    return devicePath() + F("state");
+}
+
+LJsonObject* mqttJsonDevice() {
+    return (new LJsonObject())
+        ->addChild("name", nameDeviceId())
+        ->addChild("identifiers", (new LJsonArray())
+            ->addChild(nameDeviceId())
+        )
+        ->addChild("manufacturer", "diy")
+    ;
+}
+
+void sendState() {
+    log_n("Send state to MQTT");
+    mqttService.getClient()->publish(statePath().c_str(), 1, true, ljson_stringify((new LJsonObject)
+        ->addChild("last_signal", lastSignal)
+    , true).c_str());
+}
+
+void sendStateConfigSensor() {
+    String mqttPath = mqttService.getConfig()->haDiscovery;
+    if (mqttPath != "") {
+        log_n("Send discovery config sensor to MQTT");
+        
+        String path = mqttPath + F("/sensor/diy/") + nameDeviceId() + F("_last_signal/config");
+        path.toLowerCase();
+        
+        mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
+            ->addChild("state_topic", statePath())
+            ->addChild("value_template", "{{ value_json.last_signal }}")
+            ->addChild("qos", 2)
+            ->addChild("name", "Last signal")
+            ->addChild("unique_id", nameDeviceId() + F("_last_signal"))
+            ->addChild("object_id", nameDeviceId() + F("_last_signal"))
+            ->addChild("device", mqttJsonDevice())
+        , true).c_str());
+    }
+}
+
+void sendStateConfigLight() {
+    String mqttPath = mqttService.getConfig()->haDiscovery;
+    if (mqttPath != "") {
+        log_n("Send discovery config light to MQTT");
+        
+        String path = mqttPath + F("/light/diy/") + nameDeviceId() + F("_light/config");
+        path.toLowerCase();
+        
+        mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
+            ->addChild("command_topic", sendPath())
+            ->addChild("payload_on", "light/on")
+            ->addChild("payload_off", "light/off")
+            ->addChild("qos", 2)
+            ->addChild("name", "Light")
+            ->addChild("unique_id", nameDeviceId() + F("_light"))
+            ->addChild("object_id", nameDeviceId() + F("_light"))
+            ->addChild("device", mqttJsonDevice())
+        , true).c_str());
+    }
+}
+
+void sendStateConfigFan() {
+    String mqttPath = mqttService.getConfig()->haDiscovery;
+    if (mqttPath != "") {
+        log_n("Send discovery config fan to MQTT");
+        
+        String path = mqttPath + F("/fan/diy/") + nameDeviceId() + F("_fan/config");
+        path.toLowerCase();
+        
+        mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
+            ->addChild("command_topic", sendPath())
+            ->addChild("percentage_command_topic", speedPath())
+            ->addChild("payload_on", "fan/on")
+            ->addChild("payload_off", "fan/off")
+            ->addChild("speed_range_min", 0)
+            ->addChild("speed_range_max", 3)
+            ->addChild("qos", 2)
+            ->addChild("name", "Fan")
+            ->addChild("unique_id", nameDeviceId() + F("_fan"))
+            ->addChild("object_id", nameDeviceId() + F("_fan"))
+            ->addChild("device", mqttJsonDevice())
+        , true).c_str());
+    }
+}
+
+void sendStateConfigFanBt(int number) {
+    String mqttPath = mqttService.getConfig()->haDiscovery;
+    if (mqttPath != "") {
+        log_n("Send discovery config fan button 1 to MQTT");
+        
+        String path = mqttPath + F("/button/diy/") + nameDeviceId() + F("_fan_button_") + number + F("/config");
+        path.toLowerCase();
+        
+        mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
+            ->addChild("command_topic", sendPath())
+            ->addChild("payload_press", String("fan/") + number)
+            ->addChild("qos", 2)
+            ->addChild("name", String("Fan speed ") + number)
+            ->addChild("unique_id", nameDeviceId() + F("_fan_") + number)
+            ->addChild("object_id", nameDeviceId() + F("_fan_") + number)
+            ->addChild("device", mqttJsonDevice())
+        , true).c_str());
+    }
+}
+
+void setup() {
+    
+    irsend.begin();
+    log_init(115200);
+    
+    log_n(F("START " __FILE__ " from " __DATE__));
+
+    fileFS.init([]() {
+        // On error initialize FS
+        pinMode(PIN_LED_WIFI, OUTPUT);
+        while(1) {
+            led_flash(PIN_LED_WIFI, 100, 1000);
+        } 
+    });
+    
+    // Lire la mémoire RTC
+    currentTime = millis();
+    system_rtc_mem_read(65, &rtcMem, sizeof(rtcMem));
+
+    if (rtcMem.duration < LONG_RESET_TIME) {
+        rtcMem.resetCount++;
+    } else {
+        rtcMem.resetCount = 1;
+    }
+    rtcMem.duration = 0;
+    system_rtc_mem_write(65, &rtcMem, sizeof(rtcMem));
+
+    if (rtcMem.resetCount >= 6) { 
+        log_n("VERY MULTI PRESS RESET !");
+        wifiService.clearConfig();
+        mqttService.clearConfig();
+        rtcMem.duration = 0;
+        rtcMem.resetCount = 0;
+        system_rtc_mem_write(65, &rtcMem, sizeof(rtcMem));
+        log_n("RESTART !");
+        ESP.restart();
+        return;
+    } else
+    if (rtcMem.resetCount >= 3) {  // Exemple : 3 redémarrages successifs = appui long détecté
+        log_n("multi press Reset !");
+        wifiService.startRescueMode();
+    } else {
+        log_l("Reset normal ("); log_l(rtcMem.resetCount); log_n(")");
+    }
+    
+    sendConfig = millis();
+    
+    webServer.init();
+    wifiService.init(&fileFS, &webServer, PIN_LED_WIFI, true);
+    
+    mqttService.init(&fileFS, &webServer, [] () {
+        mqttService.getClient()->subscribe(sendPath().c_str(), 1);
+        mqttService.getClient()->subscribe(speedPath().c_str(), 1);
+        sendState();
+    });
+    mqttService.getClient()->onMessage([] (char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
+        String topicStr = String(topic);
+        String payloadStr = String(payload);
+        payloadStr = payloadStr.substring(0, len);
+        payloadStr.trim();
+        
+        log_n("On message: ");
+        log_l("    - name: ");log_n(topicStr);
+        log_l("    - payload: "); log_n(payloadStr);
+        
+        if (topicStr == speedPath()) {
+            mqttPreset = payloadStr;
+            log_l("Change rpeset to: "); log_n(mqttPreset);
+        } else
+        if (topicStr == sendPath()) {
+            if (payloadStr.startsWith("light/on")) {
+                signal = 1;
+                lastSignal = "light/on";
+            }
+            if (payloadStr.startsWith("light/off")) {
+                signal = 2;
+                lastSignal = "light/off";
+            }
+            if (payloadStr.startsWith("fan/off")) {
+                signal = 3;
+                lastSignal = "fan/0";
+            }
+            if (payloadStr.startsWith("fan/on")) {
+                log_l("Set fan on with speed:"); log_n(mqttPreset);
+                if (mqttPreset == "0") {
+                    signal = 4;
+                    lastSignal = "fan/1";
+                } else if (mqttPreset == "1") {
+                    signal = 5;
+                    lastSignal = "fan/2";
+                } else if (mqttPreset == "2") {
+                    signal = 6;
+                    lastSignal = "fan/3";
+                } else if (mqttPreset == "3") {
+                    signal = 7;
+                    lastSignal = "fan/4";
+                } else {
+                    signal = 3;
+                    lastSignal = "fan/0";
+                }
+            }
+            if (payloadStr.startsWith("fan/1")) {
+                signal = 4;
+                lastSignal = "fan/1";
+            }
+            if (payloadStr.startsWith("fan/2")) {
+                signal = 5;
+                lastSignal = "fan/2";
+            }
+            if (payloadStr.startsWith("fan/3")) {
+                signal = 6;
+                lastSignal = "fan/3";
+            }
+            if (payloadStr.startsWith("fan/4")) {
+                signal = 7;
+                lastSignal = "fan/4";
+            }
+        }
+        
+    });
+    
+    LJsonAsyncWebServer *server = webServer.getInstance();
+    server->on("/api/hotte/last", HTTP_GET, [] (AsyncWebServerRequest* request) {
+        request->send(200, "application/json", ljson_stringify((new LJsonObject)
+            ->addChild("last",  lastSignal)
+        , true));
+    });
+    server->on("/api/hotte/light/on", HTTP_GET, [] (AsyncWebServerRequest* request) {
+        signal = 1;
+        lastSignal = "light/on";
+        request->send(200, "application/json", ljson_stringify((new LJsonObject)
+            ->addChild("resul", true)
+        , true));
+    });
+    server->on("/api/hotte/light/off", HTTP_GET, [] (AsyncWebServerRequest* request) {
+        signal = 2;
+        lastSignal = "light/off";
+        request->send(200, "application/json", ljson_stringify((new LJsonObject)
+            ->addChild("resul", true)
+        , true));
+    });
+    server->on("/api/hotte/fan/0", HTTP_GET, [] (AsyncWebServerRequest* request) {
+        signal = 3;
+        lastSignal = "fan/0";
+        request->send(200, "application/json", ljson_stringify((new LJsonObject)
+            ->addChild("resul", true)
+        , true));
+    });
+    server->on("/api/hotte/fan/1", HTTP_GET, [] (AsyncWebServerRequest* request) {
+        signal = 4;
+        lastSignal = "fan/1";
+        request->send(200, "application/json", ljson_stringify((new LJsonObject)
+            ->addChild("resul", true)
+        , true));
+    });
+    server->on("/api/hotte/fan/2", HTTP_GET, [] (AsyncWebServerRequest* request) {
+        signal = 5;
+        lastSignal = "fan/2";
+        request->send(200, "application/json", ljson_stringify((new LJsonObject)
+            ->addChild("resul", true)
+        , true));
+    });
+    server->on("/api/hotte/fan/3", HTTP_GET, [] (AsyncWebServerRequest* request) {
+        signal = 6;
+        lastSignal = "fan/3";
+        request->send(200, "application/json", ljson_stringify((new LJsonObject)
+            ->addChild("resul", true)
+        , true));
+    });
+    server->on("/api/hotte/fan/4", HTTP_GET, [] (AsyncWebServerRequest* request) {
+        signal = 7;
+        lastSignal = "fan/4";
+        request->send(200, "application/json", ljson_stringify((new LJsonObject)
+            ->addChild("resul", true)
+        , true));
+    });
+}
+
+void send(const uint16_t signal[], uint16_t length) {
+    irsend.sendRaw(signal, length, 38);
+    delay(50); 
+    irsend.sendRaw(signal, length, 38);
+    delay(50); 
+    irsend.sendRaw(signal, length, 38);
+    delay(50); 
+    irsend.sendRaw(signal, length, 38);
+}
+
+bool configSentFanBt3 = false;
+bool configSentFanBt2 = false;
+bool configSentFanBt1 = false;
+bool configSentFan = false;
+bool configSentSensor = false;
+bool configSentLight = false;
+
+void loop() {
+    
+    if (rtcMem.duration == 0) {
+        if ((millis() - currentTime) >= LONG_RESET_TIME) {
+            rtcMem.duration = LONG_RESET_TIME + 10;
+            system_rtc_mem_write(65, &rtcMem, sizeof(rtcMem));
+        }
+    }
+    
+    if (signal == 1) {
+        delay(500);
+        log_n("Send Light on");
+        send(LightOn, lengthLightOn);
+        signal = 0;
+        delay(500);
+        sendState();
+    }
+    if (signal == 2) { 
+        delay(500);
+        log_n("Send Light off");
+        send(LightOff, lengthLightOff);
+        signal = 0;
+        delay(500);
+        sendState();
+    }
+    if (signal == 3) {
+        delay(500);
+        log_n("Send Fan off");
+        send(FanOff, lengthFanOff);
+        signal = 0;
+        delay(500);
+        sendState();
+    }
+    if (signal == 4) {
+        delay(500);
+        log_n("Send Fan 1");
+        send(Fan1, lengthFan1);
+        delay(500);
+        signal = 0;
+        sendState();
+    }
+    if (signal == 5) {
+        delay(500);
+        log_n("Send Fan 2");
+        send(Fan2, lengthFan2);
+        signal = 0;
+        delay(500);
+        sendState();
+    }
+    if (signal == 6) {
+        delay(500);
+        log_n("Send Fan 3");
+        send(Fan3, lengthFan3);
+        signal = 0;
+        delay(500);
+        sendState();
+    }
+    if (signal == 7) {
+        delay(500);
+        log_n("Send Fan 4");
+        send(Fan4, lengthFan4);
+        signal = 0;
+        delay(500);
+        sendState();
+    }
+    if (ESP.getFreeHeap() < 5000) {
+        ESP.restart();
+    }
+    
+    
+    uint now = millis();
+    
+    if (now - sendConfig > 14000) {
+        sendConfig = now;
+        configSentSensor = false;
+        configSentLight = false;
+        configSentFan = false;
+        configSentFanBt1 = false;
+        configSentFanBt2 = false;
+        configSentFanBt3 = false;
+        
+        sendStateConfigFanBt(4);
+    } else
+    if (now - sendConfig > 12000) {
+        if (!configSentFanBt3) {
+            configSentFanBt3 = true;
+            sendStateConfigFanBt(3);
+        }
+    } else
+    if (now - sendConfig > 10000) {
+        if (!configSentFanBt2) {
+            configSentFanBt2 = true;
+            sendStateConfigFanBt(2);
+        }
+    } else
+    if (now - sendConfig > 8000) {
+        if (!configSentFanBt1) {
+            configSentFanBt1 = true;
+            sendStateConfigFanBt(1);
+        }
+    } else
+    if (now - sendConfig > 6000) {
+        if (!configSentFan) {
+            configSentFan = true;
+            sendStateConfigFan();
+        }
+    } else
+    if (now - sendConfig > 4000) {
+        if (!configSentLight) {
+            configSentLight = true;
+            sendStateConfigLight();
+        }
+    } else
+    if (now - sendConfig > 2000) {
+        if (!configSentSensor) {
+            configSentSensor = true;
+            sendStateConfigSensor();
+        }
+    }
+    
+    
+    if (now - previous > 2000) {
+        previous = now;
+        log_l("MEMORY: ");
+        log_l(ESP.getFreeHeap());
+        log_l(" MFB: ");
+        log_l(ESP.getMaxFreeBlockSize());
+        log_l(" FRAG: ");
+        log_n(ESP.getHeapFragmentation());
+    }
+   
+    fileFS.loop();
+    webServer.loop();
+    wifiService.loop();
+    mqttService.loop();
+}
