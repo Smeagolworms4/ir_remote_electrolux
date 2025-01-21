@@ -56,7 +56,7 @@ struct {
 
 unsigned long currentTime;
 String lastSignal = "";
-String mqttPreset = "low";
+String mqttFanSpeed = "1";
 uint8_t signal = 0;
 uint previous = 0;
 uint sendConfig = 0;
@@ -99,8 +99,16 @@ LJsonObject* mqttJsonDevice() {
 
 void sendState() {
     log_n("Send state to MQTT");
+    int speed = 0;
+    if (mqttFanSpeed == "1") speed = 1;
+    if (mqttFanSpeed == "2") speed = 2;
+    if (mqttFanSpeed == "3") speed = 3;
+    if (mqttFanSpeed == "4") speed = 4;
+    
     mqttService.getClient()->publish(statePath().c_str(), 1, true, ljson_stringify((new LJsonObject)
         ->addChild("last_signal", lastSignal)
+        ->addChild("fan_speed", speed)
+        ->addChild("fan_speed_percent", speed * 100 / 4)
     , true).c_str());
 }
 
@@ -115,7 +123,6 @@ void sendStateConfigSensor() {
         mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
             ->addChild("state_topic", statePath())
             ->addChild("value_template", "{{ value_json.last_signal }}")
-            ->addChild("qos", 2)
             ->addChild("name", "Last signal")
             ->addChild("unique_id", nameDeviceId() + F("_last_signal"))
             ->addChild("object_id", nameDeviceId() + F("_last_signal"))
@@ -136,7 +143,6 @@ void sendStateConfigLight() {
             ->addChild("command_topic", sendPath())
             ->addChild("payload_on", "light/on")
             ->addChild("payload_off", "light/off")
-            ->addChild("qos", 2)
             ->addChild("name", "Light")
             ->addChild("unique_id", nameDeviceId() + F("_light"))
             ->addChild("object_id", nameDeviceId() + F("_light"))
@@ -154,13 +160,14 @@ void sendStateConfigFan() {
         path.toLowerCase();
         
         mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
+            ->addChild("percentage_state_topic", statePath())
+            ->addChild("percentage_value_template", "{{ value_json.fan_speed }}")
             ->addChild("command_topic", sendPath())
             ->addChild("percentage_command_topic", speedPath())
             ->addChild("payload_on", "fan/on")
             ->addChild("payload_off", "fan/off")
-            ->addChild("speed_range_min", 0)
-            ->addChild("speed_range_max", 3)
-            ->addChild("qos", 2)
+            ->addChild("speed_range_min", 1)
+            ->addChild("speed_range_max", 4)
             ->addChild("name", "Fan")
             ->addChild("unique_id", nameDeviceId() + F("_fan"))
             ->addChild("object_id", nameDeviceId() + F("_fan"))
@@ -172,7 +179,7 @@ void sendStateConfigFan() {
 void sendStateConfigFanBt(int number) {
     String mqttPath = mqttService.getConfig()->haDiscovery;
     if (mqttPath != "") {
-        log_n("Send discovery config fan button 1 to MQTT");
+        log_l("Send discovery config fan button "); log_l(number); log_n(" to MQTT");
         
         String path = mqttPath + F("/button/diy/") + nameDeviceId() + F("_fan_button_") + number + F("/config");
         path.toLowerCase();
@@ -255,8 +262,24 @@ void setup() {
         log_l("    - payload: "); log_n(payloadStr);
         
         if (topicStr == speedPath()) {
-            mqttPreset = payloadStr;
-            log_l("Change rpeset to: "); log_n(mqttPreset);
+            mqttFanSpeed = payloadStr;
+            log_l("Change preset to: "); log_n(mqttFanSpeed);
+            if (mqttFanSpeed == "1") {
+                signal = 4;
+                lastSignal = "fan/1";
+            } else if (mqttFanSpeed == "2") {
+                signal = 5;
+                lastSignal = "fan/2";
+            } else if (mqttFanSpeed == "3") {
+                signal = 6;
+                lastSignal = "fan/3";
+            } else if (mqttFanSpeed == "4") {
+                signal = 7;
+                lastSignal = "fan/4";
+            } else {
+                signal = 3;
+                lastSignal = "fan/0";
+            }
         } else
         if (topicStr == sendPath()) {
             if (payloadStr.startsWith("light/on")) {
@@ -272,17 +295,17 @@ void setup() {
                 lastSignal = "fan/0";
             }
             if (payloadStr.startsWith("fan/on")) {
-                log_l("Set fan on with speed:"); log_n(mqttPreset);
-                if (mqttPreset == "0") {
+                log_l("Set fan on with speed:"); log_n(mqttFanSpeed);
+                if (mqttFanSpeed == "1") {
                     signal = 4;
                     lastSignal = "fan/1";
-                } else if (mqttPreset == "1") {
+                } else if (mqttFanSpeed == "2") {
                     signal = 5;
                     lastSignal = "fan/2";
-                } else if (mqttPreset == "2") {
+                } else if (mqttFanSpeed == "3") {
                     signal = 6;
                     lastSignal = "fan/3";
-                } else if (mqttPreset == "3") {
+                } else if (mqttFanSpeed == "4") {
                     signal = 7;
                     lastSignal = "fan/4";
                 } else {
@@ -398,56 +421,60 @@ void loop() {
         log_n("Send Light on");
         send(LightOn, lengthLightOn);
         signal = 0;
-        delay(500);
         sendState();
+        delay(500);
     }
     if (signal == 2) { 
         delay(500);
         log_n("Send Light off");
         send(LightOff, lengthLightOff);
         signal = 0;
-        delay(500);
         sendState();
+        delay(500);
     }
     if (signal == 3) {
         delay(500);
         log_n("Send Fan off");
         send(FanOff, lengthFanOff);
         signal = 0;
-        delay(500);
         sendState();
+        delay(500);
     }
     if (signal == 4) {
         delay(500);
         log_n("Send Fan 1");
         send(Fan1, lengthFan1);
-        delay(500);
         signal = 0;
+        mqttFanSpeed = "1";
         sendState();
+        delay(500);
     }
     if (signal == 5) {
         delay(500);
         log_n("Send Fan 2");
         send(Fan2, lengthFan2);
         signal = 0;
-        delay(500);
+        mqttFanSpeed = "2";
         sendState();
+        delay(500);
     }
     if (signal == 6) {
         delay(500);
         log_n("Send Fan 3");
         send(Fan3, lengthFan3);
         signal = 0;
-        delay(500);
+        mqttFanSpeed = "3";
         sendState();
+        delay(500);
     }
     if (signal == 7) {
         delay(500);
         log_n("Send Fan 4");
         send(Fan4, lengthFan4);
         signal = 0;
-        delay(500);
+        mqttFanSpeed = "4";
         sendState();
+        delay(500);
     }
     if (ESP.getFreeHeap() < 5000) {
         ESP.restart();
