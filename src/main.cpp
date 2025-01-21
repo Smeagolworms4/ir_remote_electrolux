@@ -94,6 +94,7 @@ LJsonObject* mqttJsonDevice() {
             ->addChild(nameDeviceId())
         )
         ->addChild("manufacturer", "diy")
+        ->addChild("configuration_url", String("http://")+WiFi.localIP().toString())
     ;
 }
 
@@ -109,13 +110,16 @@ void sendState() {
         ->addChild("last_signal", lastSignal)
         ->addChild("fan_speed", speed)
         ->addChild("fan_speed_percent", speed * 100 / 4)
+        ->addChild("wifi_ip", WiFi.localIP().toString())
+        ->addChild("wifi_signal", (int)WiFiResult::rssi2Quality(WiFi.RSSI()))
+        ->addChild("wifi_ssid", wifiService.getConfig()->stSsid)
     , true).c_str());
 }
 
-void sendStateConfigSensor() {
+void sendStateConfigSensorLastSignal() {
     String mqttPath = mqttService.getConfig()->haDiscovery;
     if (mqttPath != "") {
-        log_n("Send discovery config sensor to MQTT");
+        log_n("Send discovery config sensor_last_signal to MQTT");
         
         String path = mqttPath + F("/sensor/diy/") + nameDeviceId() + F("_last_signal/config");
         path.toLowerCase();
@@ -126,6 +130,74 @@ void sendStateConfigSensor() {
             ->addChild("name", "Last signal")
             ->addChild("unique_id", nameDeviceId() + F("_last_signal"))
             ->addChild("object_id", nameDeviceId() + F("_last_signal"))
+            ->addChild("device", mqttJsonDevice())
+        , true).c_str());
+    }
+}
+
+void sendStateConfigSensorWifiIp() {
+    String mqttPath = mqttService.getConfig()->haDiscovery;
+    if (mqttPath != "") {
+        log_n("Send discovery config sensor_wifi_ip to MQTT");
+        
+        String path = mqttPath + F("/sensor/diy/") + nameDeviceId() + F("_wifi_ip/config");
+        path.toLowerCase();
+        
+        mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
+            ->addChild("state_topic", statePath())
+            ->addChild("value_template", "{{ value_json.wifi_ip }}")
+            ->addChild("entity_category", "diagnostic")
+            ->addChild("qos", 0)
+            ->addChild("name", "WiFi ip") 
+            ->addChild("icon", "mdi:ip-outline") 
+            ->addChild("unique_id", nameDeviceId() + F("_wifi_ip"))
+            ->addChild("object_id", nameDeviceId() + F("_wifi_ip"))
+            ->addChild("device", mqttJsonDevice())
+        , true).c_str());
+    }
+}
+
+void sendStateConfigSensorWifiSsid() {
+    String mqttPath = mqttService.getConfig()->haDiscovery;
+    if (mqttPath != "") {
+        log_n("Send discovery config sensor_wifi_ssid to MQTT");
+        
+        String path = mqttPath + F("/sensor/diy/") + nameDeviceId() + F("_wifi_ssid/config");
+        path.toLowerCase();
+        
+        mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
+            ->addChild("state_topic", statePath())
+            ->addChild("value_template", "{{ value_json.wifi_ssid }}")
+            ->addChild("entity_category", "diagnostic")
+            ->addChild("qos", 0)
+            ->addChild("name", "WiFi SSID") 
+            ->addChild("icon", "mdi:wifi-settings") 
+            ->addChild("unique_id", nameDeviceId() + F("wifi_ssid"))
+            ->addChild("object_id", nameDeviceId() + F("wifi_ssid"))
+            ->addChild("device", mqttJsonDevice())
+        , true).c_str());
+    }
+}
+
+void sendStateConfigSensorWifiSignal() {
+    String mqttPath = mqttService.getConfig()->haDiscovery;
+    if (mqttPath != "") {
+        log_n("Send discovery config sensor_wifi_signal to MQTT");
+        
+        String path = mqttPath + F("/sensor/diy/") + nameDeviceId() + F("_wifi_signal/config");
+        path.toLowerCase();
+        
+        mqttService.getClient()->publish(path.c_str(), 1, true, ljson_stringify((new LJsonObject)
+            ->addChild("state_topic", statePath())
+            ->addChild("value_template", "{{ value_json.wifi_signal }}")
+            ->addChild("entity_category", "diagnostic")
+            ->addChild("dev_cla", "signal_strength")
+            ->addChild("unit_of_meas", "dBm")
+            ->addChild("stat_cla", "measurement")
+            ->addChild("qos", 0)
+            ->addChild("name", "WiFi signal") 
+            ->addChild("unique_id", nameDeviceId() + F("_wifi_signal"))
+            ->addChild("object_id", nameDeviceId() + F("_wifi_signal"))
             ->addChild("device", mqttJsonDevice())
         , true).c_str());
     }
@@ -143,6 +215,7 @@ void sendStateConfigLight() {
             ->addChild("command_topic", sendPath())
             ->addChild("payload_on", "light/on")
             ->addChild("payload_off", "light/off")
+            ->addChild("qos", 2)
             ->addChild("name", "Light")
             ->addChild("unique_id", nameDeviceId() + F("_light"))
             ->addChild("object_id", nameDeviceId() + F("_light"))
@@ -168,6 +241,7 @@ void sendStateConfigFan() {
             ->addChild("payload_off", "fan/off")
             ->addChild("speed_range_min", 1)
             ->addChild("speed_range_max", 4)
+            ->addChild("qos", 2)
             ->addChild("name", "Fan")
             ->addChild("unique_id", nameDeviceId() + F("_fan"))
             ->addChild("object_id", nameDeviceId() + F("_fan"))
@@ -400,12 +474,7 @@ void send(const uint16_t signal[], uint16_t length) {
     irsend.sendRaw(signal, length, 38);
 }
 
-bool configSentFanBt3 = false;
-bool configSentFanBt2 = false;
-bool configSentFanBt1 = false;
-bool configSentFan = false;
-bool configSentSensor = false;
-bool configSentLight = false;
+int stepConfig = 0;
 
 void loop() {
     
@@ -483,51 +552,68 @@ void loop() {
     
     uint now = millis();
     
-    if (now - sendConfig > 14000) {
+    if (now - sendConfig > 50000) {
         sendConfig = now;
-        configSentSensor = false;
-        configSentLight = false;
-        configSentFan = false;
-        configSentFanBt1 = false;
-        configSentFanBt2 = false;
-        configSentFanBt3 = false;
-        
-        sendStateConfigFanBt(4);
+        stepConfig = 0;
+    } else
+    if (now - sendConfig > 20000) {
+        if (stepConfig == 9) {
+            stepConfig++;
+            sendStateConfigSensorWifiSsid();
+        }
+    } else
+    if (now - sendConfig > 18000) {
+        if (stepConfig == 8) {
+            stepConfig++;
+            sendStateConfigSensorWifiIp();
+        }
+    } else
+    if (now - sendConfig > 16000) {
+        if (stepConfig == 7) {
+            stepConfig++;
+            sendStateConfigSensorWifiSignal();
+        }
+    } else
+    if (now - sendConfig > 14000) {
+        if (stepConfig == 6) {
+            stepConfig++;
+            sendStateConfigFanBt(4);
+        }
     } else
     if (now - sendConfig > 12000) {
-        if (!configSentFanBt3) {
-            configSentFanBt3 = true;
+        if (stepConfig == 5) {
+            stepConfig++;
             sendStateConfigFanBt(3);
         }
     } else
     if (now - sendConfig > 10000) {
-        if (!configSentFanBt2) {
-            configSentFanBt2 = true;
+        if (stepConfig == 4) {
+            stepConfig++;
             sendStateConfigFanBt(2);
         }
     } else
     if (now - sendConfig > 8000) {
-        if (!configSentFanBt1) {
-            configSentFanBt1 = true;
+        if (stepConfig == 3) {
+            stepConfig++;
             sendStateConfigFanBt(1);
         }
     } else
     if (now - sendConfig > 6000) {
-        if (!configSentFan) {
-            configSentFan = true;
+        if (stepConfig == 2) {
+            stepConfig++;
             sendStateConfigFan();
         }
     } else
     if (now - sendConfig > 4000) {
-        if (!configSentLight) {
-            configSentLight = true;
+        if (stepConfig == 1) {
+            stepConfig++;
             sendStateConfigLight();
         }
     } else
     if (now - sendConfig > 2000) {
-        if (!configSentSensor) {
-            configSentSensor = true;
-            sendStateConfigSensor();
+        if (stepConfig == 0) {
+            stepConfig++;
+            sendStateConfigSensorLastSignal();
         }
     }
     

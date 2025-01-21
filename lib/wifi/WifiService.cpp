@@ -224,6 +224,10 @@ void WifiService::initWebServer() {
     }
 }
 
+WiFiConfig* WifiService::getConfig() {
+    return &this->config;
+}
+
 void WifiService::saveConfig() {
     String str = ljson_stringify(&this->config);
     log_l("Save config: "); log_n(str);

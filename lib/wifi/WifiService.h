@@ -31,6 +31,7 @@ class WifiService {
         bool useLed();
         WiFiResultList* scanAsync();
 
+        WiFiConfig* getConfig();
         void saveConfig();
         void loadConfig();
         void clearConfig();
